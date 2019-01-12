@@ -583,3 +583,88 @@ public final void reset() {
 }
 ```
 reset首先调用freeAllTrackedBuffers，之后调用native_reset。
+
+接下来我们分析对输入和输出缓冲区的操作。
+```
+public final void queueInputBuffer(
+        int index,
+        int offset, int size, long presentationTimeUs, int flags)
+    throws CryptoException {
+    synchronized(mBufferLock) {
+        invalidateByteBuffer(mCachedInputBuffers, index);
+        mDequeuedInputBuffers.remove(index);
+    }
+    try {
+        native_queueInputBuffer(
+                index, offset, size, presentationTimeUs, flags);
+    } catch (CryptoException | IllegalStateException e) {
+        revalidateByteBuffer(mCachedInputBuffers, index);
+        throw e;
+    }
+}
+private native final void native_queueInputBuffer(
+        int index,
+        int offset, int size, long presentationTimeUs, int flags)
+    throws CryptoException;
+```
+queueInputBuffer的各个参数作用如下：index，int，客户端所持有的由前一次dequeueInputBuffer返回的输入缓冲区的index；offset，int，在输入缓冲区中，数据的起始位置，以字节为单位；size，int，有效输入数据的字节数；presentationTimeUs，long，缓冲区的presentation 时间戳，以ms为单位，这一般是缓冲区应该被展示或者渲染的媒体时间，当使用一个out surface，一般是当前帧的时间戳；flags，int，位掩码，BUFFER_FLAG_CODEC_CONFIG，BUFFER_FLAG_END_OF_STREAM，虽然并不禁止，但是大多数codec不会对输入缓冲区使用BUFFER_FLAG_KEY_FRAME。如果MediaCodec没有处于Executing状态，将会抛出IllegalStateException异常；如果codec遇到error，将会抛出MediaCodec.CodecException；如果指定了crypto对象，将会抛出CryptoException。
+queueInputBuffer首先对mCachedInputBuffers，index调用invalidateByteBuffer，然后从mDequeuedInputBuffers中remove第index个item。之后，尝试调用native_queueInputBuffer。
+```
+public final int dequeueInputBuffer(long timeoutUs) {
+    int res = native_dequeueInputBuffer(timeoutUs);
+    if (res >= 0) {
+        synchronized(mBufferLock) {
+            validateInputByteBuffer(mCachedInputBuffers, res);
+        }
+    }
+    return res;
+}
+private native final int native_dequeueInputBuffer(long timeoutUs);
+```
+dequeueInputBuffer返回一个将用来填充有效数据的输入缓冲区，如果没有缓冲区可用，将返回-1。参数timeoutUs指定一个超时时间，以ms为单位，如果设置为负数，表示无限等待，如果设置为0，方法将立即返回。如果MediaCodec没有处于Executing状态，会抛出IllegalStateException异常；如果发生codec error，会抛出MediaCodec.CodecException异常。首先调用native_dequeueInputBuffer，如果返回结果>=0，就对mCachedInputBuffers的第res条item调用validateInputByteBuffer。最后，返回res。
+```
+public final int dequeueOutputBuffer(
+        @NonNull BufferInfo info, long timeoutUs) {
+    int res = native_dequeueOutputBuffer(info, timeoutUs);
+    synchronized(mBufferLock) {
+        if (res == INFO_OUTPUT_BUFFERS_CHANGED) {
+            cacheBuffers(false /* input */);
+        } else if (res >= 0) {
+            validateOutputByteBuffer(mCachedOutputBuffers, res, info);
+            if (mHasSurface) {
+                mDequeuedOutputInfos.put(res, info.dup());
+            }
+        }
+    }
+    return res;
+}
+private native final int native_dequeueOutputBuffer(
+        @NonNull BufferInfo info, long timeoutUs);
+```
+dequeueOutputBuffer使一个输出缓冲区出队列，阻塞最多timeoutUs毫秒。参数info将会被缓冲区元数据填充。如果MediaCodec没有处于Executing状态，或者codec被配置为异步模式，将会抛出IllegalStateException异常；如果codec遇到error，将会抛出MediaCodec.CodecExceptio。首先调用native_dequeueOutputBuffer，如果返回结果等于INFO_OUTPUT_BUFFERS_CHANGED，就调用cacheBuffers（false）；否则，如果res>=0，就对mCachedOutputBuffers的第res个item调用validateOutputByteBuffer，如果mHasSurface为true，调用mDequeuedOutputInfos.put(res, info.dup())，将缓冲区index和对应的bufferInfo存入mDequeuedOutputInfos。
+```
+public final void releaseOutputBuffer(int index, boolean render) {
+    BufferInfo info = null;
+    synchronized(mBufferLock) {
+        invalidateByteBuffer(mCachedOutputBuffers, index);
+        mDequeuedOutputBuffers.remove(index);
+        if (mHasSurface) {
+            info = mDequeuedOutputInfos.remove(index);
+        }
+    }
+    releaseOutputBuffer(index, render, false /* updatePTS */, 0 /* dummy */);
+}
+public final void releaseOutputBuffer(int index, long renderTimestampNs) {
+    BufferInfo info = null;
+    synchronized(mBufferLock) {
+        invalidateByteBuffer(mCachedOutputBuffers, index);
+        mDequeuedOutputBuffers.remove(index);
+        if (mHasSurface) {
+            info = mDequeuedOutputInfos.remove(index);
+        }
+    }
+    releaseOutputBuffer(
+            index, true /* render */, true /* updatePTS */, renderTimestampNs);
+}
+```
+如果已经使用完buffer，以上两个方法可以将buffer还给codec，或者，将buffer在out surface上进行渲染。
