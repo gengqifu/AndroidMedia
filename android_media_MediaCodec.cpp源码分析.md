@@ -228,4 +228,26 @@ static void android_media_MediaCodec_queueInputBuffer(
 这里会的调用JMediaCodec的queueInputBuffer，把缓冲区索引index，偏移offset，size，时间戳timestampUs，flags传入，把错误信息回传到errorDetailMsg。
 
 - flush, stop, reset, release
-实际上，这些操作，都是通过JMediaCodec中对应的方法实现。
+实际上，这些操作，都是通过JMediaCodec中对应的方法实现。其中，release实际调用setMediaCodec(env, thiz, NULL)。
+```
+static sp<JMediaCodec> setMediaCodec(
+808        JNIEnv *env, jobject thiz, const sp<JMediaCodec> &codec) {
+809    sp<JMediaCodec> old = (JMediaCodec *)env->GetLongField(thiz, gFields.context);
+810    if (codec != NULL) {
+811        codec->incStrong(thiz);
+812    }
+813    if (old != NULL) {
+814        /* release MediaCodec and stop the looper now before decStrong.
+815         * otherwise JMediaCodec::~JMediaCodec() could be called from within
+816         * its message handler, doing release() from there will deadlock
+817         * (as MediaCodec::release() post synchronous message to the same looper)
+818         */
+819        old->release();
+820        old->decStrong(thiz);
+821    }
+822    env->SetLongField(thiz, gFields.context, (jlong)codec.get());
+823
+824    return old;
+825}
+```
+setMediaCodec方法中，如果参数codec不等于NULL，需要增加codec的强引用计数。这里release调用传入的参数是NULL，所以不回发生。如果获取的JMediaCodec的强引用old不为NULL，就调用old的release，并且将old的强引用计数减少一。注意，这里release MediaCodec和stop looper必须在减少强引用计数之前调用，否则将会形成死锁。
