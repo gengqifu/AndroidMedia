@@ -250,4 +250,23 @@ static sp<JMediaCodec> setMediaCodec(
 824    return old;
 825}
 ```
-setMediaCodec方法中，如果参数codec不等于NULL，需要增加codec的强引用计数。这里release调用传入的参数是NULL，所以不回发生。如果获取的JMediaCodec的强引用old不为NULL，就调用old的release，并且将old的强引用计数减少一。注意，这里release MediaCodec和stop looper必须在减少强引用计数之前调用，否则将会形成死锁。
+setMediaCodec方法中，如果参数codec不等于NULL，需要增加codec的强引用计数。这里release调用传入的参数是NULL，所以不会发生。如果获取的JMediaCodec的强引用old不为NULL，就调用old的release，并且将old的强引用计数减少一。注意，这里release MediaCodec和stop looper必须在减少强引用计数之前调用，否则将会形成死锁。
+
+- JMediaCodec类
+JMediaCodec就定义在android_media_MediaCodec.h中。类定义代码我们这里就不拷贝了。接下来我们要重点分析MediaCodec的各个状态转换方法在JMediaCodec中的实现。实际上，JMediaCodec类中的方法，最终又调用了stagefright框架中MediaCodec类中的方法。重点看一下JMediaCodec中的release方法。
+```
+void JMediaCodec::release() {
+192    if (mCodec != NULL) {
+193        mCodec->release();
+194        mCodec.clear();
+195        mInitStatus = NO_INIT;
+196    }
+197
+198    if (mLooper != NULL) {
+199        mLooper->unregisterHandler(id());
+200        mLooper->stop();
+201        mLooper.clear();
+202    }
+203}
+```
+这里进行两部操作，一个是调用stagefraight中MediaCodec的release方法，下一步是停止looper。
